@@ -1,0 +1,139 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+)
+
+// Converter holds conversion history, same pattern as Calculator.
+//
+// It also carries its own sync.Mutex. This is necessary because the batch
+// demo (see batch.go) calls these methods from multiple goroutines at once,
+// and every method here appends to the shared History slice. Without a lock,
+// concurrent appends are a data race — `go build -race` catches it instantly.
+type Converter struct {
+	mu      sync.Mutex
+	History []string
+}
+
+func NewConverter() *Converter {
+	return &Converter{History: make([]string, 0)}
+}
+
+// appendHistory is the single place that mutates cv.History, so it's the
+// single place that needs to lock cv.mu — every Convert* method below calls
+// it instead of touching cv.History directly.
+func (cv *Converter) appendHistory(entry string) {
+	cv.mu.Lock()
+	defer cv.mu.Unlock()
+	cv.History = append(cv.History, entry)
+}
+
+// Package-level lookup tables (maps). Every length/weight unit is expressed
+// relative to one BASE UNIT (meters / grams), so adding a new unit only
+// means adding one more map entry instead of writing a new formula.
+var lengthToMeters = map[string]float64{
+	"m": 1, "km": 1000, "cm": 0.01, "mm": 0.001,
+	"mile": 1609.34, "ft": 0.3048, "in": 0.0254,
+}
+
+var weightToGrams = map[string]float64{
+	"g": 1, "kg": 1000, "mg": 0.001, "lb": 453.592, "oz": 28.3495,
+}
+
+// ConvertLength: pointer receiver because it appends to cv.History.
+func (cv *Converter) ConvertLength(value float64, from, to string) (float64, error) {
+	from, to = strings.ToLower(from), strings.ToLower(to)
+
+	fromFactor, ok1 := lengthToMeters[from]
+	toFactor, ok2 := lengthToMeters[to]
+	if !ok1 || !ok2 {
+		return 0, fmt.Errorf("unsupported length unit (from=%s, to=%s)", from, to)
+	}
+
+	meters := value * fromFactor
+	result := meters / toFactor
+
+	entry := fmt.Sprintf("%.2f%s -> %.2f%s (length)", value, from, result, to)
+	cv.appendHistory(entry)
+	return result, nil
+}
+
+// ConvertWeight follows the identical pattern as ConvertLength.
+func (cv *Converter) ConvertWeight(value float64, from, to string) (float64, error) {
+	from, to = strings.ToLower(from), strings.ToLower(to)
+
+	fromFactor, ok1 := weightToGrams[from]
+	toFactor, ok2 := weightToGrams[to]
+	if !ok1 || !ok2 {
+		return 0, fmt.Errorf("unsupported weight unit (from=%s, to=%s)", from, to)
+	}
+
+	grams := value * fromFactor
+	result := grams / toFactor
+
+	entry := fmt.Sprintf("%.2f%s -> %.2f%s (weight)", value, from, result, to)
+	cv.appendHistory(entry)
+	return result, nil
+}
+
+// ConvertTemperature can't use a simple multiplier (there's an offset), so it
+// uses IF/SWITCH to route through Celsius as a common base instead of a map.
+func (cv *Converter) ConvertTemperature(value float64, from, to string) (float64, error) {
+	from, to = strings.ToUpper(from), strings.ToUpper(to)
+
+	if from == to { // simple if-statement short-circuit
+		return value, nil
+	}
+
+	var celsius float64
+	switch from {
+	case "C":
+		celsius = value
+	case "F":
+		celsius = (value - 32) * 5 / 9
+	case "K":
+		celsius = value - 273.15
+	default:
+		return 0, errors.New("unsupported temperature unit: " + from)
+	}
+
+	var result float64
+	switch to {
+	case "C":
+		result = celsius
+	case "F":
+		result = celsius*9/5 + 32
+	case "K":
+		result = celsius + 273.15
+	default:
+		return 0, errors.New("unsupported temperature unit: " + to)
+	}
+
+	entry := fmt.Sprintf("%.2f%s -> %.2f%s (temperature)", value, from, result, to)
+	cv.appendHistory(entry)
+	return result, nil
+}
+
+// SupportedUnits builds a human-readable list of units for a category by
+// LOOPING over the relevant map's keys.
+func SupportedUnits(category string) string {
+	var units []string
+
+	switch category {
+	case "length":
+		for u := range lengthToMeters { // range loop over a map
+			units = append(units, u)
+		}
+	case "weight":
+		for u := range weightToGrams {
+			units = append(units, u)
+		}
+	case "temperature":
+		units = []string{"C", "F", "K"}
+	}
+
+	return strings.Join(units, ", ")
+}
