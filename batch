@@ -1,0 +1,59 @@
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+// ConversionJob is one unit of work we want to run concurrently.
+type ConversionJob struct {
+	Value    float64
+	FromUnit string
+	ToUnit   string
+	Category string // "length", "weight", or "temperature"
+}
+
+// ConversionResult pairs a job with its outcome (or error).
+type ConversionResult struct {
+	Job    ConversionJob
+	Output float64
+	Err    error
+}
+
+// RunBatchConversion launches one GOROUTINE per job so all conversions run
+// concurrently, then uses sync.WaitGroup to wait for every goroutine to
+// finish, and sync.Mutex to protect the shared results slice from data races.
+func RunBatchConversion(cv *Converter, jobs []ConversionJob) []ConversionResult {
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	results := make([]ConversionResult, 0, len(jobs))
+
+	for _, job := range jobs {
+		wg.Add(1) // register one goroutine with the WaitGroup
+
+		go func(j ConversionJob) { // j is passed as a parameter, so each
+			defer wg.Done() // goroutine gets its own copy — avoids the classic loop-variable pitfall
+
+			var out float64
+			var err error
+
+			switch j.Category {
+			case "length":
+				out, err = cv.ConvertLength(j.Value, j.FromUnit, j.ToUnit)
+			case "weight":
+				out, err = cv.ConvertWeight(j.Value, j.FromUnit, j.ToUnit)
+			case "temperature":
+				out, err = cv.ConvertTemperature(j.Value, j.FromUnit, j.ToUnit)
+			default:
+				err = fmt.Errorf("unknown category: %s", j.Category)
+			}
+
+			mu.Lock() // only one goroutine may append at a time
+			results = append(results, ConversionResult{Job: j, Output: out, Err: err})
+			mu.Unlock()
+		}(job)
+	}
+
+	wg.Wait() // block here until every goroutine has called wg.Done()
+	return results
+}
